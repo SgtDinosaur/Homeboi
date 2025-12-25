@@ -1,0 +1,49 @@
+---
+# Media server deployment (Plex, Jellyfin)
+
+- name: Deploy Plex
+  docker_container:
+    name: "{{ homeboi_services.plex.container_name }}"
+    image: "{{ homeboi_services.plex.image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services.plex.ports }}"
+    env: "{{ homeboi_services.plex.environment }}"
+    volumes: "{{ homeboi_services.plex.volumes }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+
+- name: Deploy Jellyfin
+  docker_container:
+    name: "{{ homeboi_services.jellyfin.container_name }}"
+    image: "{{ homeboi_services.jellyfin.image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services.jellyfin.ports }}"
+    env: "{{ homeboi_services.jellyfin.environment }}"
+    volumes: "{{ homeboi_services.jellyfin.volumes }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+
+- name: Wait for Plex to be ready
+  uri:
+    url: "http://{{ server_ip }}:32400/web"
+    method: GET
+    timeout: 10
+  register: plex_status
+  until: plex_status.status == 200
+  retries: 12
+  delay: 5
+
+- name: Wait for Jellyfin to be ready
+  uri:
+    url: "http://{{ server_ip }}:8096"
+    method: GET
+    timeout: 10
+  register: jellyfin_status
+  until: jellyfin_status.status == 200
+  retries: 12
+  delay: 5
+
+- name: Configure Jellyfin (first-run bootstrap)
+  include_tasks: configure_jellyfin.yml

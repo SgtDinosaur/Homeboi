@@ -1,0 +1,205 @@
+---
+# Service definitions for all Homeboi containers
+
+homeboi_services:
+
+  # VPN Container
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    ports:
+      - "8000:8000"  # Control server
+      - "8080:8080"  # SABnzbd through VPN
+      - "9696:9696"  # Prowlarr through VPN
+    environment:
+      VPN_SERVICE_PROVIDER: "{{ vpn_service_provider | default('') }}"
+      OPENVPN_USER: "{{ openvpn_user | default('') }}"
+      OPENVPN_PASSWORD: "{{ openvpn_password | default('') }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/gluetun:/gluetun"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    when: vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none'
+
+  # Download Clients
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    network_mode: "container:gluetun"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/sabnzbd:/config"
+      - "{{ media_paths.downloads }}:/downloads"
+    depends_on:
+      - gluetun
+
+  sabnzbd_standalone:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    ports:
+      - "8080:8080"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/sabnzbd:/config"
+      - "{{ media_paths.downloads }}:/downloads"
+
+  # Indexer Management
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    network_mode: "container:gluetun"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/prowlarr:/config"
+    depends_on:
+      - gluetun
+
+  prowlarr_standalone:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    ports:
+      - "9696:9696"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/prowlarr:/config"
+
+  # Media Management (Arr Services)
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    ports:
+      - "8989:8989"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/sonarr:/config"
+      - "{{ media_paths.tv }}:/tv"
+      - "{{ media_paths.downloads }}:/downloads"
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    ports:
+      - "7878:7878"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/radarr:/config"
+      - "{{ media_paths.movies }}:/movies"
+      - "{{ media_paths.downloads }}:/downloads"
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    ports:
+      - "6767:6767"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/bazarr:/config"
+      - "{{ media_paths.movies }}:/movies"
+      - "{{ media_paths.tv }}:/tv"
+
+  # Media Servers
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    ports:
+      - "32400:32400"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+      VERSION: docker
+    volumes:
+      - "{{ homeboi_config_path }}/plex:/config"
+      - "{{ media_paths.movies }}:/movies"
+      - "{{ media_paths.tv }}:/tv"
+      - "{{ media_paths.music }}:/music"
+
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    ports:
+      - "8096:8096"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/jellyfin:/config"
+      - "{{ media_paths.movies }}:/movies"
+      - "{{ media_paths.tv }}:/tv"
+      - "{{ media_paths.music }}:/music"
+
+  # Request Management
+  overseerr:
+    image: lscr.io/linuxserver/overseerr:latest
+    container_name: overseerr
+    ports:
+      - "5055:5055"
+    environment:
+      PUID: "{{ docker_defaults.puid }}"
+      PGID: "{{ docker_defaults.pgid }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/overseerr:/app/config"
+
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    ports:
+      - "5056:5055"
+    user: "{{ docker_defaults.puid }}:{{ docker_defaults.pgid }}"
+    environment:
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/jellyseerr:/app/config"
+
+  # Home Assistant (optional)
+  home-assistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: home-assistant
+    ports:
+      - "8123:8123"
+    environment:
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/home-assistant:/config"
+    privileged: true
+
+  # Homeboi Web Dashboard
+  homeboi-web:
+    image: homeboi-web-dashboard:latest
+    container_name: homeboi-web
+    ports:
+      - "6969:6969"
+    environment:
+      # Inside the container, Homeboi is mounted at /homeboi (single source of truth).
+      HOMEBOI_HOME: "/homeboi"
+      PYTHONUNBUFFERED: "1"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "{{ homeboi_home }}:/homeboi:ro"

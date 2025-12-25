@@ -1,0 +1,85 @@
+---
+# Display all service URLs after successful deployment
+
+- name: Display deployment completion
+  debug:
+    msg: |
+      
+      🎉 Homeboi Media Stack Deployment Complete!
+      ============================================
+      
+      🌐 Homeboi Dashboard:
+      ─────────────────────
+      • Web Interface: http://{{ server_ip }}:6969
+      
+      📺 Media Servers:
+      ─────────────────
+      • Plex:      http://{{ server_ip }}:32400/web
+      • Jellyfin:  http://{{ server_ip }}:8096
+      
+      🎬 Request Management:
+      ──────────────────────
+      • Overseerr:  http://{{ server_ip }}:5055
+      • Jellyseerr: http://{{ server_ip }}:5056
+      
+      📥 Downloads:
+      ─────────────
+      • SABnzbd:    http://{{ server_ip }}:8080
+      
+      🔧 Management:
+      ──────────────
+      • Prowlarr:   http://{{ server_ip }}:9696 (Indexers)
+      • Sonarr:     http://{{ server_ip }}:8989 (TV Shows)
+      • Radarr:     http://{{ server_ip }}:7878 (Movies)
+      • Bazarr:     http://{{ server_ip }}:6767 (Subtitles)
+      {% if enable_home_assistant | default(false) %}
+      
+      🏡 Home Automation:
+      ───────────────────
+      • Home Assistant: http://{{ server_ip }}:8123
+      {% endif %}
+      {% if vpn_service_provider is defined and vpn_service_provider != 'none' %}
+      
+      🛡️ VPN Status:
+      ──────────────
+      • Provider: {{ vpn_service_provider }}
+      • Control:  http://{{ server_ip }}:8000
+      {% endif %}
+      
+      💡 Next Steps:
+      ──────────────
+      1. Choose your preferred media server (Plex or Jellyfin)
+      2. Configure your request app (Overseerr or Jellyseerr) 
+      3. Add your media folders in your chosen media server
+      4. Start requesting content!
+      
+      ✨ All services are running and interconnected!
+      API connections have been automatically configured.
+      
+      To manage this stack: ansible-playbook site.yml
+      To remove everything: ansible-playbook site.yml --extra-vars "state=absent"
+
+- name: Save service information
+  copy:
+    content: |
+      # Homeboi Service URLs
+      # Generated: {{ ansible_date_time.iso8601 }}
+      
+      HOMEBOI_WEB_URL=http://{{ server_ip }}:6969
+      PLEX_URL=http://{{ server_ip }}:32400/web
+      JELLYFIN_URL=http://{{ server_ip }}:8096
+      OVERSEERR_URL=http://{{ server_ip }}:5055
+      JELLYSEERR_URL=http://{{ server_ip }}:5056
+      SABNZBD_URL=http://{{ server_ip }}:8080
+      PROWLARR_URL=http://{{ server_ip }}:9696
+      SONARR_URL=http://{{ server_ip }}:8989
+      RADARR_URL=http://{{ server_ip }}:7878
+      BAZARR_URL=http://{{ server_ip }}:6767
+      {% if enable_home_assistant | default(false) %}
+      HOME_ASSISTANT_URL=http://{{ server_ip }}:8123
+      {% endif %}
+      {% if vpn_service_provider is defined and vpn_service_provider != 'none' %}
+      GLUETUN_URL=http://{{ server_ip }}:8000
+      {% endif %}
+    dest: "{{ homeboi_home }}/service_urls.env"
+    mode: '0644'

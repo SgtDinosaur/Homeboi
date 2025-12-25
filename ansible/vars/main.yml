@@ -1,0 +1,111 @@
+---
+# Main variables for Homeboi deployment
+
+# Network configuration
+homeboi_network:
+  name: homeboi-net
+  subnet: 172.20.0.0/16
+  gateway: 172.20.0.1
+
+# Fallback subnets to try if the default overlaps an existing Docker network.
+# Homeboi will pick the first unused /16 from this list.
+homeboi_network_candidates:
+  - 172.20.0.0/16
+  - 172.21.0.0/16
+  - 172.22.0.0/16
+  - 172.23.0.0/16
+  - 172.24.0.0/16
+  - 172.25.0.0/16
+  - 172.26.0.0/16
+  - 172.27.0.0/16
+  - 172.28.0.0/16
+  - 172.29.0.0/16
+  - 172.30.0.0/16
+  - 172.31.0.0/16
+  - 10.200.0.0/16
+  - 10.201.0.0/16
+  - 10.202.0.0/16
+  - 10.203.0.0/16
+  - 10.204.0.0/16
+  - 10.205.0.0/16
+  - 10.206.0.0/16
+  - 10.207.0.0/16
+  - 192.168.250.0/24
+  - 192.168.251.0/24
+
+# Networks created by older/other deployment modes that Homeboi may want to
+# clean up on removal (only removed if unused).
+homeboi_legacy_networks:
+  - homeboi
+  - homeboi_default
+  - bazarr_default
+  - gluetun_default
+  - home-assistant_default
+  - jellyfin_default
+  - overseerr_default
+  - plex_default
+  - prowlarr_default
+  - radarr_default
+  - sonarr_default
+
+# Base paths
+homeboi_base_path: "/home/{{ ansible_user_id }}"
+homeboi_config_path: "{{ homeboi_base_path }}/Homeboi/configs"
+homeboi_data_path: "{{ homeboi_base_path }}/media"
+
+# Default media paths
+media_paths:
+  movies: "{{ homeboi_data_path }}/movies"
+  tv: "{{ homeboi_data_path }}/tv"
+  downloads: "{{ homeboi_data_path }}/downloads"
+  books: "{{ homeboi_data_path }}/books"
+  music: "{{ homeboi_data_path }}/music"
+
+# Docker defaults
+docker_defaults:
+  restart: unless-stopped
+  puid: "{{ ansible_user_uid }}"
+  pgid: "{{ ansible_user_gid }}"
+  umask: "002"
+
+# Service dependencies - defines startup order
+service_dependencies:
+  vpn:
+    - gluetun
+  download_clients:
+    - sabnzbd
+  indexers:
+    - prowlarr
+  arr_services:
+    - sonarr
+    - radarr
+    - bazarr
+  media_servers:
+    - plex
+    - jellyfin
+  request_management:
+    - overseerr
+    - jellyseerr
+
+# Service wait conditions
+service_health_checks:
+  gluetun:
+    port: 8000
+    path: /
+    timeout: 30
+  prowlarr:
+    port: 9696
+    path: /prowlarr
+    timeout: 60
+  sabnzbd:
+    port: 8080
+    path: /sabnzbd
+    timeout: 60
+  sonarr:
+    port: 8989
+    path: /sonarr
+    timeout: 60
+  radarr:
+    port: 7878
+    path: /radarr
+    timeout: 60

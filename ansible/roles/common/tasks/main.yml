@@ -1,0 +1,209 @@
+---
+# Common setup tasks for all services
+
+- name: Check if Homeboi network already exists
+  command: docker network inspect "{{ homeboi_network.name }}"
+  register: homeboi_network_inspect
+  changed_when: false
+  failed_when: false
+
+- name: Record existing Homeboi network subnet (if present)
+  set_fact:
+    homeboi_network_subnet: >-
+      {{
+        (((homeboi_network_inspect.stdout | from_json) | first).IPAM.Config | default([]) | first).Subnet
+          | default(homeboi_network.subnet, true)
+      }}
+    homeboi_network_gateway: >-
+      {{
+        (((homeboi_network_inspect.stdout | from_json) | first).IPAM.Config | default([]) | first).Gateway
+          | default(homeboi_network.gateway, true)
+      }}
+  when: homeboi_network_inspect.rc == 0
+
+- name: List Docker network IDs (for overlap avoidance)
+  command: docker network ls -q
+  register: docker_network_ids
+  changed_when: false
+  when: homeboi_network_inspect.rc != 0
+
+- name: Inspect Docker networks (for overlap avoidance)
+  command: docker network inspect "{{ item }}"
+  loop: "{{ docker_network_ids.stdout_lines | default([]) }}"
+  register: docker_network_inspects
+  changed_when: false
+  failed_when: false
+  when: homeboi_network_inspect.rc != 0
+
+- name: Extract existing Docker network subnets
+  set_fact:
+    docker_existing_subnets: >-
+      {{
+        docker_network_inspects.results
+        | map(attribute='stdout')
+        | map('default', '[]')
+        | map('from_json')
+        | map('first')
+        | map(attribute='IPAM')
+        | map(attribute='Config')
+        | map('default', [])
+        | list
+        | flatten
+        | map(attribute='Subnet')
+        | select('defined')
+        | select('match', '^[0-9]+\\.')
+        | list
+      }}
+  when: homeboi_network_inspect.rc != 0
+
+- name: Select a non-overlapping subnet for Homeboi (if network absent)
+  shell: |
+    python3 - <<'PY'
+    import ipaddress, json, sys
+    existing = json.loads(r'''{{ docker_existing_subnets | default([]) | to_json }}''')
+    candidates = json.loads(r'''{{ homeboi_network_candidates | default([homeboi_network.subnet]) | to_json }}''')
+
+    existing_nets = []
+    for s in existing:
+        try:
+            existing_nets.append(ipaddress.ip_network(s, strict=False))
+        except ValueError:
+            pass
+
+    for c in candidates:
+        try:
+            cand = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            continue
+        if all(not cand.overlaps(e) for e in existing_nets):
+            print(c)
+            sys.exit(0)
+
+    sys.exit(1)
+    PY
+  register: homeboi_network_subnet_pick
+  changed_when: false
+  when:
+    - homeboi_network_inspect.rc != 0
+
+- name: Set chosen Homeboi subnet
+  set_fact:
+    homeboi_network_subnet: "{{ homeboi_network_subnet_pick.stdout | trim }}"
+  when:
+    - homeboi_network_inspect.rc != 0
+    - homeboi_network_subnet_pick.rc == 0
+
+- name: Compute Homeboi gateway from chosen subnet
+  shell: |
+    python3 - <<'PY'
+    import ipaddress
+    net = ipaddress.ip_network(r"""{{ homeboi_network_subnet }}""", strict=False)
+    print(str(next(net.hosts())))
+    PY
+  register: homeboi_network_gateway_pick
+  changed_when: false
+  when:
+    - homeboi_network_inspect.rc != 0
+    - homeboi_network_subnet is defined
+
+- name: Set chosen Homeboi gateway
+  set_fact:
+    homeboi_network_gateway: "{{ homeboi_network_gateway_pick.stdout | trim }}"
+  when:
+    - homeboi_network_inspect.rc != 0
+    - homeboi_network_gateway_pick is defined
+    - homeboi_network_gateway_pick.rc == 0
+
+- name: Create homeboi network (prefer explicit subnet)
+  block:
+    - name: Create homeboi network with explicit IPAM config
+      docker_network:
+        name: "{{ homeboi_network.name }}"
+        ipam_config:
+          - subnet: "{{ homeboi_network_subnet | default(homeboi_network.subnet) }}"
+            gateway: "{{ homeboi_network_gateway | default(homeboi_network.gateway) }}"
+        state: present
+  rescue:
+    - name: Fallback to Docker-managed subnet (avoids overlap issues)
+      docker_network:
+        name: "{{ homeboi_network.name }}"
+        state: present
+
+- name: Create media directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_id }}"
+    mode: '0755'
+  loop:
+    - "{{ media_paths.movies }}"
+    - "{{ media_paths.tv }}"
+    - "{{ media_paths.downloads }}"
+    - "{{ media_paths.books }}"
+    - "{{ media_paths.music }}"
+
+- name: Create config directories (non-problematic ones)
+  file:
+    path: "{{ homeboi_config_path }}/{{ item }}"
+    state: directory
+    owner: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_id }}"
+    mode: '0755'
+  loop:
+    - gluetun
+    - sabnzbd
+    - prowlarr
+    - sonarr
+    - radarr
+    - bazarr
+    - home-assistant
+
+- name: Create config directories (potentially problematic ones)
+  file:
+    path: "{{ homeboi_config_path }}/{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - plex
+    - jellyfin
+    - overseerr
+    - jellyseerr
+  ignore_errors: yes
+
+- name: Install Docker (if not present)
+  block:
+    - name: Check if Docker is installed
+      command: docker --version
+      register: docker_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Install Docker
+      shell: |
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+      become: yes
+      when: docker_check.rc != 0
+      
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user_id }}"
+        groups: docker
+        append: yes
+      become: yes
+      when: docker_check.rc != 0
+
+- name: Check if Docker service is running
+  systemd:
+    name: docker
+  register: docker_service_status
+  
+- name: Start and enable Docker
+  service:
+    name: docker
+    state: started
+    enabled: yes
+  become: yes
+  when: not docker_service_status.status.ActiveState == "active"
+  ignore_errors: yes

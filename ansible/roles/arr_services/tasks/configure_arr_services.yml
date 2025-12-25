@@ -1,0 +1,495 @@
+---
+# Automatic configuration of arr services with API connections + shared credentials
+
+- name: Determine Homeboi runtime flags
+  set_fact:
+    homeboi_vpn_enabled: "{{ vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none' }}"
+    sabnzbd_host_for_arr: "{{ 'gluetun' if (vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none') else 'sabnzbd' }}"
+    prowlarr_host_for_arr: "{{ 'gluetun' if (vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none') else 'prowlarr' }}"
+
+- name: Wait for Sonarr config.xml to exist
+  wait_for:
+    path: "{{ homeboi_config_path }}/sonarr/config.xml"
+    state: present
+    timeout: 180
+
+- name: Wait for Radarr config.xml to exist
+  wait_for:
+    path: "{{ homeboi_config_path }}/radarr/config.xml"
+    state: present
+    timeout: 180
+
+- name: Wait for Prowlarr config.xml to exist
+  wait_for:
+    path: "{{ homeboi_config_path }}/prowlarr/config.xml"
+    state: present
+    timeout: 180
+
+- name: Read API keys from config files
+  set_fact:
+    sonarr_api_key: >-
+      {{
+        (lookup('file', homeboi_config_path ~ '/sonarr/config.xml')
+          | regex_findall('(?s)<ApiKey>([^<]+)</ApiKey>')
+          | first)
+          | default('', true)
+      }}
+    radarr_api_key: >-
+      {{
+        (lookup('file', homeboi_config_path ~ '/radarr/config.xml')
+          | regex_findall('(?s)<ApiKey>([^<]+)</ApiKey>')
+          | first)
+          | default('', true)
+      }}
+    prowlarr_api_key: >-
+      {{
+        (lookup('file', homeboi_config_path ~ '/prowlarr/config.xml')
+          | regex_findall('(?s)<ApiKey>([^<]+)</ApiKey>')
+          | first)
+          | default('', true)
+      }}
+
+- name: Wait for SABnzbd config file to exist (for API wiring)
+  wait_for:
+    path: "{{ homeboi_config_path }}/sabnzbd/sabnzbd.ini"
+    state: present
+    timeout: 180
+
+- name: Read SABnzbd config file (for API wiring)
+  slurp:
+    src: "{{ homeboi_config_path }}/sabnzbd/sabnzbd.ini"
+  register: sabnzbd_ini_for_arr
+  changed_when: false
+  failed_when: false
+
+- name: Ensure SABnzbd API key is available for arr wiring
+  set_fact:
+    sabnzbd_api_key: >-
+      {{
+        (
+          sabnzbd_api_key | default('') | string
+          | regex_replace('(?im)^api_key\\s*=\\s*', '')
+          | trim
+        )
+        if (sabnzbd_api_key | default('') | length > 0)
+        else
+        (
+          (
+            (sabnzbd_ini_for_arr.content | default('') | b64decode)
+            | regex_findall('(?im)^api_key\\s*=\\s*([0-9a-fA-F]+)\\s*$')
+          )
+          | first
+          | default('')
+          | trim
+          | lower
+        )
+      }}
+
+- name: Ensure Sonarr API is responsive
+  uri:
+    url: "http://{{ server_ip }}:8989/api/v3/system/status"
+    method: GET
+    headers:
+      X-Api-Key: "{{ sonarr_api_key }}"
+    timeout: 10
+  register: sonarr_api_test
+  until: sonarr_api_test.status == 200
+  retries: 10
+  delay: 3
+
+- name: Ensure Radarr API is responsive
+  uri:
+    url: "http://{{ server_ip }}:7878/api/v3/system/status"
+    method: GET
+    headers:
+      X-Api-Key: "{{ radarr_api_key }}"
+    timeout: 10
+  register: radarr_api_test
+  until: radarr_api_test.status == 200
+  retries: 10
+  delay: 3
+
+- name: Ensure Prowlarr API is responsive
+  uri:
+    url: "http://{{ server_ip }}:9696/api/v1/system/status"
+    method: GET
+    headers:
+      X-Api-Key: "{{ prowlarr_api_key }}"
+    timeout: 10
+  register: prowlarr_api_test
+  until: prowlarr_api_test.status == 200
+  retries: 10
+  delay: 3
+
+# ---------------------------------------------------------------------------
+# Idempotent API wiring
+# ---------------------------------------------------------------------------
+
+- name: Fetch Sonarr download clients
+  uri:
+    url: "http://{{ server_ip }}:8989/api/v3/downloadclient"
+    method: GET
+    headers:
+      X-Api-Key: "{{ sonarr_api_key }}"
+    timeout: 30
+  register: sonarr_downloadclients
+
+- name: Fetch Radarr download clients
+  uri:
+    url: "http://{{ server_ip }}:7878/api/v3/downloadclient"
+    method: GET
+    headers:
+      X-Api-Key: "{{ radarr_api_key }}"
+    timeout: 30
+  register: radarr_downloadclients
+
+- name: Fetch Prowlarr applications
+  uri:
+    url: "http://{{ server_ip }}:9696/api/v1/applications"
+    method: GET
+    headers:
+      X-Api-Key: "{{ prowlarr_api_key }}"
+    timeout: 30
+  register: prowlarr_applications
+
+- name: Fetch Prowlarr indexers
+  uri:
+    url: "http://{{ server_ip }}:9696/api/v1/indexer"
+    method: GET
+    headers:
+      X-Api-Key: "{{ prowlarr_api_key }}"
+    timeout: 30
+  register: prowlarr_indexers
+
+- name: Fetch Prowlarr app profiles
+  uri:
+    url: "http://{{ server_ip }}:9696/api/v1/appProfile"
+    method: GET
+    headers:
+      X-Api-Key: "{{ prowlarr_api_key }}"
+    timeout: 30
+  register: prowlarr_app_profiles
+  failed_when: false
+
+- name: Choose Prowlarr app profile id
+  set_fact:
+    prowlarr_app_profile_id: "{{ ((prowlarr_app_profiles.json | default([]) | first).id | default(1)) | int }}"
+
+- name: Add NZBGeek indexer to Prowlarr (if missing)
+  uri:
+    url: "http://{{ server_ip }}:9696/api/v1/indexer"
+    method: POST
+    headers:
+      X-Api-Key: "{{ prowlarr_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    status_code: [200, 201]
+    body:
+      enable: true
+      name: "NZBGeek"
+      implementation: "Newznab"
+      implementationName: "Newznab"
+      protocol: "usenet"
+      configContract: "NewznabSettings"
+      appProfileId: "{{ prowlarr_app_profile_id }}"
+      priority: 25
+      redirect: true
+      enableRss: true
+      enableAutomaticSearch: true
+      enableInteractiveSearch: true
+      infoLink: "https://nzbgeek.info/"
+      tags: []
+      fields:
+        - name: "baseUrl"
+          value: "https://api.nzbgeek.info"
+        - name: "apiPath"
+          value: "/api"
+        - name: "apiKey"
+          value: "{{ nzbgeek_api }}"
+        - name: "categories"
+          value: [5000, 5070, 5080]
+  when:
+    - nzbgeek_api is defined
+    - nzbgeek_api != ""
+    - (prowlarr_indexers.json | default([]) | selectattr('name', 'equalto', 'NZBGeek') | list | length) == 0
+  ignore_errors: yes
+
+- name: Add SABnzbd to Sonarr (if missing)
+  uri:
+    url: "http://{{ server_ip }}:8989/api/v3/downloadclient"
+    method: POST
+    timeout: 30
+    headers:
+      X-Api-Key: "{{ sonarr_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    status_code: [200, 201, 400, 409]
+    body:
+      enable: true
+      name: "SABnzbd"
+      implementation: "Sabnzbd"
+      configContract: "SabnzbdSettings"
+      protocol: "usenet"
+      priority: 1
+      fields:
+        - name: "host"
+          value: "{{ sabnzbd_host_for_arr }}"
+        - name: "port"
+          value: 8080
+        - name: "apiKey"
+          value: "{{ sabnzbd_api_key }}"
+        - name: "tvCategory"
+          value: "tv"
+        - name: "useSsl"
+          value: false
+  register: sonarr_sabnzbd_add
+  failed_when: false
+  when:
+    - sabnzbd_api_key | default('') | length > 0
+    - (sonarr_downloadclients.json | default([]) | selectattr('name', 'equalto', 'SABnzbd') | list | length) == 0
+  ignore_errors: yes
+
+- name: Report Sonarr SABnzbd add status
+  debug:
+    msg: "Sonarr -> SABnzbd: HTTP {{ sonarr_sabnzbd_add.status | default('n/a') }} (200/201 ok; 400/409 often means already exists or connectivity/auth issue)"
+  when: sonarr_sabnzbd_add is defined
+  ignore_errors: yes
+
+- name: Add SABnzbd to Radarr (if missing)
+  uri:
+    url: "http://{{ server_ip }}:7878/api/v3/downloadclient"
+    method: POST
+    timeout: 30
+    headers:
+      X-Api-Key: "{{ radarr_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    status_code: [200, 201, 400, 409]
+    body:
+      enable: true
+      name: "SABnzbd"
+      implementation: "Sabnzbd"
+      configContract: "SabnzbdSettings"
+      protocol: "usenet"
+      priority: 1
+      fields:
+        - name: "host"
+          value: "{{ sabnzbd_host_for_arr }}"
+        - name: "port"
+          value: 8080
+        - name: "apiKey"
+          value: "{{ sabnzbd_api_key }}"
+        - name: "movieCategory"
+          value: "movies"
+        - name: "useSsl"
+          value: false
+  register: radarr_sabnzbd_add
+  failed_when: false
+  when:
+    - sabnzbd_api_key | default('') | length > 0
+    - (radarr_downloadclients.json | default([]) | selectattr('name', 'equalto', 'SABnzbd') | list | length) == 0
+  ignore_errors: yes
+
+- name: Report Radarr SABnzbd add status
+  debug:
+    msg: "Radarr -> SABnzbd: HTTP {{ radarr_sabnzbd_add.status | default('n/a') }} (200/201 ok; 400/409 often means already exists or connectivity/auth issue)"
+  when: radarr_sabnzbd_add is defined
+  ignore_errors: yes
+
+- name: Add Sonarr app to Prowlarr (if missing)
+  uri:
+    url: "http://{{ server_ip }}:9696/api/v1/applications"
+    method: POST
+    timeout: 30
+    headers:
+      X-Api-Key: "{{ prowlarr_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    status_code: [200, 201]
+    body:
+      name: "Sonarr"
+      implementation: "Sonarr"
+      implementationName: "Sonarr"
+      configContract: "SonarrSettings"
+      syncLevel: "fullSync"
+      fields:
+        - name: "prowlarrUrl"
+          value: "http://{{ prowlarr_host_for_arr }}:9696"
+        - name: "baseUrl"
+          value: "http://sonarr:8989"
+        - name: "apiKey"
+          value: "{{ sonarr_api_key }}"
+        - name: "syncCategories"
+          value: [5000, 5010, 5020, 5030, 5040, 5045, 5050, 5060, 5070, 5080, 5090]
+  when: (prowlarr_applications.json | default([]) | selectattr('name', 'equalto', 'Sonarr') | list | length) == 0
+  ignore_errors: yes
+
+- name: Add Radarr app to Prowlarr (if missing)
+  uri:
+    url: "http://{{ server_ip }}:9696/api/v1/applications"
+    method: POST
+    timeout: 30
+    headers:
+      X-Api-Key: "{{ prowlarr_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    status_code: [200, 201]
+    body:
+      name: "Radarr"
+      implementation: "Radarr"
+      implementationName: "Radarr"
+      configContract: "RadarrSettings"
+      syncLevel: "fullSync"
+      fields:
+        - name: "prowlarrUrl"
+          value: "http://{{ prowlarr_host_for_arr }}:9696"
+        - name: "baseUrl"
+          value: "http://radarr:7878"
+        - name: "apiKey"
+          value: "{{ radarr_api_key }}"
+        - name: "syncCategories"
+          value: [2000, 2010, 2020, 2030, 2040, 2045, 2050, 2060, 2070, 2080, 2090]
+  when: (prowlarr_applications.json | default([]) | selectattr('name', 'equalto', 'Radarr') | list | length) == 0
+  ignore_errors: yes
+
+# ---------------------------------------------------------------------------
+# Shared username/password for UI access (optional)
+# ---------------------------------------------------------------------------
+
+- name: Configure shared credentials for Sonarr/Radarr/Prowlarr (forms auth)
+  block:
+    - name: Fetch Sonarr host config
+      uri:
+        url: "http://{{ server_ip }}:8989/api/v3/config/host"
+        method: GET
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        timeout: 30
+      register: sonarr_host_config
+      no_log: true
+
+    - name: Update Sonarr host config (enable forms auth)
+      uri:
+        url: "http://{{ server_ip }}:8989/api/v3/config/host"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ sonarr_host_config.json | combine({'authenticationMethod': 'forms', 'authenticationRequired': 'enabled', 'username': homeboi_username, 'password': homeboi_password, 'passwordConfirmation': homeboi_password}) }}"
+        status_code: [200, 202, 400, 401, 403, 409, 500]
+        timeout: 30
+      register: sonarr_host_update
+      failed_when: false
+      no_log: true
+
+    - name: Report Sonarr auth configuration status
+      debug:
+        msg: "Sonarr auth config: HTTP {{ sonarr_host_update.status | default('n/a') }} (expected 200/202)"
+      when: (sonarr_host_update.status | default(0)) not in [200, 202]
+
+    - name: Fetch Radarr host config
+      uri:
+        url: "http://{{ server_ip }}:7878/api/v3/config/host"
+        method: GET
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+        timeout: 30
+      register: radarr_host_config
+      no_log: true
+
+    - name: Update Radarr host config (enable forms auth)
+      uri:
+        url: "http://{{ server_ip }}:7878/api/v3/config/host"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ radarr_host_config.json | combine({'authenticationMethod': 'forms', 'authenticationRequired': 'enabled', 'username': homeboi_username, 'password': homeboi_password, 'passwordConfirmation': homeboi_password}) }}"
+        status_code: [200, 202, 400, 401, 403, 409, 500]
+        timeout: 30
+      register: radarr_host_update
+      failed_when: false
+      no_log: true
+
+    - name: Report Radarr auth configuration status
+      debug:
+        msg: "Radarr auth config: HTTP {{ radarr_host_update.status | default('n/a') }} (expected 200/202)"
+      when: (radarr_host_update.status | default(0)) not in [200, 202]
+
+    - name: Fetch Prowlarr host config
+      uri:
+        url: "http://{{ server_ip }}:9696/api/v1/config/host"
+        method: GET
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        timeout: 30
+      register: prowlarr_host_config
+      no_log: true
+
+    - name: Update Prowlarr host config (enable forms auth)
+      uri:
+        url: "http://{{ server_ip }}:9696/api/v1/config/host"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ prowlarr_host_config.json | combine({'authenticationMethod': 'forms', 'authenticationRequired': 'enabled', 'username': homeboi_username, 'password': homeboi_password, 'passwordConfirmation': homeboi_password}) }}"
+        status_code: [200, 202, 400, 401, 403, 409, 500]
+        timeout: 30
+      register: prowlarr_host_update
+      failed_when: false
+      no_log: true
+
+    - name: Report Prowlarr auth configuration status
+      debug:
+        msg: "Prowlarr auth config: HTTP {{ prowlarr_host_update.status | default('n/a') }} (expected 200/202)"
+      when: (prowlarr_host_update.status | default(0)) not in [200, 202]
+  when:
+    - enable_arr_auth | default(true) | bool
+    - homeboi_username | default('') | length > 0
+    - homeboi_password | default('') | length > 0
+  ignore_errors: yes
+
+- name: Wait for Bazarr config.yaml to exist
+  wait_for:
+    path: "{{ homeboi_config_path }}/bazarr/config/config.yaml"
+    state: present
+    timeout: 180
+  when: enable_arr_auth | default(true) | bool
+
+- name: Configure shared credentials for Bazarr (forms auth)
+  uri:
+    url: "http://{{ server_ip }}:6767/api/system/settings"
+    method: POST
+    headers:
+      X-API-KEY: "{{ bazarr_api_key }}"
+    body_format: form-urlencoded
+    body:
+      settings-auth-type: "form"
+      settings-auth-username: "{{ homeboi_username }}"
+      settings-auth-password: "{{ homeboi_password }}"
+    status_code: [200, 400, 401, 403, 409, 500]
+    timeout: 30
+  register: bazarr_auth_update
+  failed_when: false
+  vars:
+    bazarr_api_key: >-
+      {{
+        ((lookup('file', homeboi_config_path ~ '/bazarr/config/config.yaml') | from_yaml).auth.apikey)
+          | default('', true)
+      }}
+  when:
+    - enable_arr_auth | default(true) | bool
+    - bazarr_api_key | length > 0
+  no_log: true
+
+- name: Report Bazarr auth configuration status
+  debug:
+    msg: "Bazarr auth config: HTTP {{ bazarr_auth_update.status | default('n/a') }} (expected 200)"
+  when:
+    - bazarr_auth_update is defined
+    - (bazarr_auth_update.status | default(0)) != 200
+  ignore_errors: yes

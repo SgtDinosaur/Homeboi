@@ -1,0 +1,107 @@
+---
+# Arr services deployment (Sonarr, Radarr, Bazarr, Prowlarr)
+
+- name: Deploy Prowlarr (with VPN)
+  docker_container:
+    name: "{{ homeboi_services.prowlarr.container_name }}"
+    image: "{{ homeboi_services.prowlarr.image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    network_mode: "{{ homeboi_services.prowlarr.network_mode }}"
+    env: "{{ homeboi_services.prowlarr.environment }}"
+    volumes: "{{ homeboi_services.prowlarr.volumes }}"
+  when: vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none'
+
+- name: Deploy Prowlarr (standalone)
+  docker_container:
+    name: "{{ homeboi_services.prowlarr_standalone.container_name }}"
+    image: "{{ homeboi_services.prowlarr_standalone.image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services.prowlarr_standalone.ports }}"
+    env: "{{ homeboi_services.prowlarr_standalone.environment }}"
+    volumes: "{{ homeboi_services.prowlarr_standalone.volumes }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+  when: vpn_service_provider is not defined or vpn_service_provider == '' or vpn_service_provider == 'none'
+
+- name: Deploy Sonarr
+  docker_container:
+    name: "{{ homeboi_services.sonarr.container_name }}"
+    image: "{{ homeboi_services.sonarr.image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services.sonarr.ports }}"
+    env: "{{ homeboi_services.sonarr.environment }}"
+    volumes: "{{ homeboi_services.sonarr.volumes }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+
+- name: Deploy Radarr
+  docker_container:
+    name: "{{ homeboi_services.radarr.container_name }}"
+    image: "{{ homeboi_services.radarr.image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services.radarr.ports }}"
+    env: "{{ homeboi_services.radarr.environment }}"
+    volumes: "{{ homeboi_services.radarr.volumes }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+
+- name: Deploy Bazarr
+  docker_container:
+    name: "{{ homeboi_services.bazarr.container_name }}"
+    image: "{{ homeboi_services.bazarr.image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services.bazarr.ports }}"
+    env: "{{ homeboi_services.bazarr.environment }}"
+    volumes: "{{ homeboi_services.bazarr.volumes }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+
+# Wait for all services to be ready
+- name: Wait for Prowlarr to be ready
+  uri:
+    url: "http://{{ server_ip }}:9696/ping"
+    method: GET
+    timeout: 10
+  register: prowlarr_status
+  until: prowlarr_status.status == 200
+  retries: 12
+  delay: 5
+
+- name: Wait for Sonarr to be ready
+  uri:
+    url: "http://{{ server_ip }}:8989/ping"
+    method: GET
+    timeout: 10
+  register: sonarr_status
+  until: sonarr_status.status == 200
+  retries: 12
+  delay: 5
+
+- name: Wait for Radarr to be ready
+  uri:
+    url: "http://{{ server_ip }}:7878/ping"
+    method: GET
+    timeout: 10
+  register: radarr_status
+  until: radarr_status.status == 200
+  retries: 12
+  delay: 5
+
+- name: Wait for Bazarr to be ready
+  uri:
+    url: "http://{{ server_ip }}:6767/"
+    method: GET
+    timeout: 10
+  register: bazarr_status
+  until: bazarr_status.status == 200
+  retries: 12
+  delay: 5
+
+# Configure services
+- name: Configure arr services
+  include_tasks: configure_arr_services.yml

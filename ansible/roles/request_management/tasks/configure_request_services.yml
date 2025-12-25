@@ -1,0 +1,47 @@
+---
+# Configure Overseerr and Jellyseerr initial setup (fully automatable)
+# Plex/Jellyfin linking inside Overseerr/Jellyseerr still requires an authenticated session
+# (Plex OAuth / connect.sid), so we only do the non-interactive bootstrap here.
+
+- name: Check Overseerr initialization status
+  uri:
+    url: "http://{{ server_ip }}:5055/api/v1/settings/public"
+    method: GET
+    timeout: 10
+    status_code: [200, 404]
+  register: overseerr_public
+  failed_when: false
+
+- name: Overseerr requires interactive first login
+  debug:
+    msg: >-
+      Overseerr is not initialized yet. It creates the first admin user during the initial Plex sign-in flow.
+      Open http://{{ server_ip }}:5055 and complete the setup; Homeboi will automate the rest afterwards.
+  when: overseerr_public.json.initialized | default(false) | bool == false
+
+- name: Report Overseerr initialization status
+  debug:
+    msg: "Overseerr initialized: {{ overseerr_public.json.initialized | default(false) | bool }}"
+  ignore_errors: yes
+
+- name: Check Jellyseerr initialization status
+  uri:
+    url: "http://{{ server_ip }}:5056/api/v1/settings/public"
+    method: GET
+    timeout: 10
+    status_code: [200, 404]
+  register: jellyseerr_public
+  failed_when: false
+
+- name: Jellyseerr requires interactive first login
+  debug:
+    msg: >-
+      Jellyseerr is not initialized yet. It creates the first admin user during the initial media-server sign-in flow
+      (Jellyfin or Plex, depending on what you choose).
+      Open http://{{ server_ip }}:5056 and complete the setup; Homeboi will automate the rest afterwards.
+  when: jellyseerr_public.json.initialized | default(false) | bool == false
+
+- name: Report Jellyseerr initialization status
+  debug:
+    msg: "Jellyseerr initialized: {{ jellyseerr_public.json.initialized | default(false) | bool }}"
+  ignore_errors: yes

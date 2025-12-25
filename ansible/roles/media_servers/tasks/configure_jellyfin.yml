@@ -1,0 +1,197 @@
+---
+# Automate Jellyfin first-run wizard (server name + initial admin user)
+
+- name: Read Jellyfin public system info
+  uri:
+    url: "http://{{ server_ip }}:8096/System/Info/Public"
+    method: GET
+    timeout: 10
+    status_code: [200]
+  register: jellyfin_public
+  failed_when: false
+
+- name: Read Jellyfin user state from database (for safe bootstrap)
+  shell: >-
+    python3 -c
+    "import json, sqlite3;
+    p='{{ homeboi_config_path }}/jellyfin/data/data/jellyfin.db';
+    con=sqlite3.connect(p);
+    cur=con.cursor();
+    cur.execute('SELECT Username, EnableLocalPassword, Password FROM Users');
+    rows=cur.fetchall();
+    users=[{'username':r[0], 'enableLocalPassword':int(r[1] or 0), 'hasPassword': bool(r[2])} for r in rows];
+    out={
+      'count': len(users),
+      'users': users,
+      'hasLocalPasswordUser': any(u['enableLocalPassword']==1 or u['hasPassword'] for u in users),
+      'allUsersNoPassword': (len(users)>0 and all((u['enableLocalPassword']==0 and not u['hasPassword']) for u in users))
+    };
+    print(json.dumps(out))"
+  register: jellyfin_users_state_raw
+  changed_when: false
+  failed_when: false
+
+- name: Parse Jellyfin user state
+  set_fact:
+    jellyfin_users_state: "{{ jellyfin_users_state_raw.stdout | default('{}') | from_json }}"
+
+- name: Repair broken first-run state (wizard completed but no usable user)
+  block:
+    - name: Mark Jellyfin startup wizard as incomplete (system.xml)
+      replace:
+        path: "{{ homeboi_config_path }}/jellyfin/system.xml"
+        regexp: "<IsStartupWizardCompleted>.*?</IsStartupWizardCompleted>"
+        replace: "<IsStartupWizardCompleted>false</IsStartupWizardCompleted>"
+
+    - name: Set Jellyfin server name (system.xml)
+      replace:
+        path: "{{ homeboi_config_path }}/jellyfin/system.xml"
+        regexp: "<ServerName\\s*/>|<ServerName>.*?</ServerName>"
+        replace: "<ServerName>{{ homeboi_hostname | default(ansible_hostname, true) }}</ServerName>"
+
+    - name: Remove unusable Jellyfin users (database)
+      shell: >-
+        python3 -c
+        "import sqlite3;
+        p='{{ homeboi_config_path }}/jellyfin/data/data/jellyfin.db';
+        con=sqlite3.connect(p);
+        cur=con.cursor();
+        cur.execute('DELETE FROM UserData');
+        cur.execute('DELETE FROM Users');
+        con.commit()"
+      changed_when: true
+
+    - name: Restart Jellyfin after repair
+      docker_container:
+        name: "{{ homeboi_services.jellyfin.container_name }}"
+        state: started
+        restart: true
+  when:
+    - jellyfin_public.json.StartupWizardCompleted | default(false) | bool
+    - (jellyfin_users_state.allUsersNoPassword | default(false) | bool)
+  ignore_errors: yes
+
+- name: Read Jellyfin public system info (current)
+  uri:
+    url: "http://{{ server_ip }}:8096/System/Info/Public"
+    method: GET
+    timeout: 10
+    status_code: [200]
+  register: jellyfin_public_now
+  failed_when: false
+
+- name: Check if Jellyfin has any users (current)
+  uri:
+    url: "http://{{ server_ip }}:8096/Users/Public"
+    method: GET
+    timeout: 10
+    status_code: [200]
+  register: jellyfin_users_public_now
+  failed_when: false
+
+- name: Configure Jellyfin startup settings (server name, locale)
+  uri:
+    url: "http://{{ server_ip }}:8096/Startup/Configuration"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      ServerName: "{{ homeboi_hostname | default(ansible_hostname, true) }}"
+      UICulture: "en-US"
+      MetadataCountryCode: "US"
+      PreferredMetadataLanguage: "en"
+    status_code: [204]
+    timeout: 30
+  when:
+    - jellyfin_public_now.json.StartupWizardCompleted | default(false) | bool == false
+  ignore_errors: yes
+
+- name: Create Jellyfin initial admin user (first-run)
+  uri:
+    url: "http://{{ server_ip }}:8096/Startup/User"
+    method: GET
+    timeout: 10
+    status_code: [200]
+  register: jellyfin_startup_user_seed
+  failed_when: false
+  when:
+    - jellyfin_public_now.json.StartupWizardCompleted | default(false) | bool == false
+    - (jellyfin_users_public_now.json | default([]) | length) == 0
+  ignore_errors: yes
+
+- name: Create Jellyfin initial admin user (first-run)
+  uri:
+    url: "http://{{ server_ip }}:8096/Startup/User"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      Name: "{{ homeboi_username }}"
+      Password: "{{ homeboi_password }}"
+    status_code: [200, 204, 409]
+    timeout: 30
+  register: jellyfin_startup_user_create
+  failed_when: false
+  no_log: true
+  when:
+    - jellyfin_public_now.json.StartupWizardCompleted | default(false) | bool == false
+    - (jellyfin_users_public_now.json | default([]) | length) == 0
+    - homeboi_username | default('') | length > 0
+    - homeboi_password | default('') | length > 0
+  ignore_errors: yes
+
+- name: Re-read Jellyfin user state from database (post-bootstrap)
+  shell: >-
+    python3 -c
+    "import json, sqlite3;
+    p='{{ homeboi_config_path }}/jellyfin/data/data/jellyfin.db';
+    con=sqlite3.connect(p);
+    cur=con.cursor();
+    cur.execute('SELECT Username, EnableLocalPassword, Password FROM Users');
+    rows=cur.fetchall();
+    users=[{'username':r[0], 'enableLocalPassword':int(r[1] or 0), 'hasPassword': bool(r[2])} for r in rows];
+    out={
+      'count': len(users),
+      'users': users,
+      'hasLocalPasswordUser': any(u['enableLocalPassword']==1 or u['hasPassword'] for u in users),
+      'allUsersNoPassword': (len(users)>0 and all((u['enableLocalPassword']==0 and not u['hasPassword']) for u in users))
+    };
+    print(json.dumps(out))"
+  register: jellyfin_users_state_after_raw
+  changed_when: false
+  failed_when: false
+
+- name: Parse Jellyfin user state (post-bootstrap)
+  set_fact:
+    jellyfin_users_state_after: "{{ jellyfin_users_state_after_raw.stdout | default('{}') | from_json }}"
+
+- name: Complete Jellyfin startup wizard
+  uri:
+    url: "http://{{ server_ip }}:8096/Startup/Complete"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body: {}
+    status_code: [204]
+    timeout: 30
+  when:
+    - jellyfin_public_now.json.StartupWizardCompleted | default(false) | bool == false
+    - jellyfin_users_state_after.hasLocalPasswordUser | default(false) | bool
+  ignore_errors: yes
+
+- name: Re-read Jellyfin public system info (post-bootstrap)
+  uri:
+    url: "http://{{ server_ip }}:8096/System/Info/Public"
+    method: GET
+    timeout: 10
+    status_code: [200]
+  register: jellyfin_public_after
+  failed_when: false
+
+- name: Report Jellyfin wizard completion state
+  debug:
+    msg: "Jellyfin StartupWizardCompleted: {{ jellyfin_public_after.json.StartupWizardCompleted | default(false) | bool }}"
+  ignore_errors: yes

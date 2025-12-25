@@ -1,0 +1,52 @@
+---
+# Download client deployment (SABnzbd, etc.)
+
+- name: Deploy SABnzbd (with VPN)
+  docker_container:
+    name: sabnzbd
+    image: lscr.io/linuxserver/sabnzbd:latest
+    state: started
+    restart_policy: unless-stopped
+    network_mode: "container:gluetun"
+    env:
+      PUID: "{{ ansible_user_uid | string }}"
+      PGID: "{{ ansible_user_gid | string }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/sabnzbd:/config"
+      - "{{ media_paths.downloads }}:/downloads"
+  when: vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none'
+
+- name: Deploy SABnzbd (standalone)
+  docker_container:
+    name: sabnzbd
+    image: lscr.io/linuxserver/sabnzbd:latest
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "8080:8080"
+    env:
+      PUID: "{{ ansible_user_uid | string }}"
+      PGID: "{{ ansible_user_gid | string }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/sabnzbd:/config"
+      - "{{ media_paths.downloads }}:/downloads"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+  when: vpn_service_provider is not defined or vpn_service_provider == '' or vpn_service_provider == 'none'
+
+- name: Wait for SABnzbd to be ready
+  uri:
+    url: "http://{{ server_ip }}:8080"
+    method: GET
+    timeout: 10
+    status_code: [200, 302]  # SABnzbd may redirect
+  register: sabnzbd_status
+  until: sabnzbd_status.status in [200, 302]
+  retries: 6
+  delay: 10
+  ignore_errors: yes
+
+- name: Configure SABnzbd
+  include_tasks: configure_sabnzbd.yml

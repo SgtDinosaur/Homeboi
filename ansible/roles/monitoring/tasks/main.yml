@@ -1,0 +1,60 @@
+---
+# Optional monitoring services (Home Assistant, etc.)
+
+- name: Deploy Home Assistant (if enabled)
+  docker_container:
+    name: "{{ homeboi_services['home-assistant'].container_name }}"
+    image: "{{ homeboi_services['home-assistant'].image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services['home-assistant'].ports }}"
+    env: "{{ homeboi_services['home-assistant'].environment }}"
+    volumes: "{{ homeboi_services['home-assistant'].volumes }}"
+    privileged: "{{ homeboi_services['home-assistant'].privileged }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+  when: enable_home_assistant | default(false)
+
+- name: Wait for Home Assistant to be ready
+  uri:
+    url: "http://{{ server_ip }}:8123"
+    method: GET
+    timeout: 10
+  register: hass_status
+  until: hass_status.status == 200
+  retries: 15
+  delay: 10
+  when: enable_home_assistant | default(false)
+
+- name: Build Homeboi Web Dashboard image
+  docker_image:
+    name: homeboi-web-dashboard
+    tag: latest
+    build:
+      path: "{{ homeboi_home }}/web-dashboard"
+      dockerfile: Dockerfile
+    source: build
+    force_source: true
+
+- name: Deploy Homeboi Web Dashboard
+  docker_container:
+    name: "{{ homeboi_services['homeboi-web'].container_name }}"
+    image: "{{ homeboi_services['homeboi-web'].image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services['homeboi-web'].ports }}"
+    env: "{{ homeboi_services['homeboi-web'].environment }}"
+    volumes: "{{ homeboi_services['homeboi-web'].volumes }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+    pull: false
+
+- name: Wait for Homeboi Web Dashboard to be ready
+  uri:
+    url: "http://{{ server_ip }}:6969"
+    method: GET
+    timeout: 10
+  register: dashboard_status
+  until: dashboard_status.status == 200
+  retries: 10
+  delay: 5

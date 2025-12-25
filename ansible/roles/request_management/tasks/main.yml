@@ -1,0 +1,49 @@
+---
+# Request management deployment (Overseerr, Jellyseerr)
+
+- name: Deploy Overseerr
+  docker_container:
+    name: "{{ homeboi_services.overseerr.container_name }}"
+    image: "{{ homeboi_services.overseerr.image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services.overseerr.ports }}"
+    env: "{{ homeboi_services.overseerr.environment }}"
+    volumes: "{{ homeboi_services.overseerr.volumes }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+
+- name: Deploy Jellyseerr
+  docker_container:
+    name: "{{ homeboi_services.jellyseerr.container_name }}"
+    image: "{{ homeboi_services.jellyseerr.image }}"
+    state: started
+    restart_policy: "{{ docker_defaults.restart }}"
+    ports: "{{ homeboi_services.jellyseerr.ports }}"
+    env: "{{ homeboi_services.jellyseerr.environment }}"
+    volumes: "{{ homeboi_services.jellyseerr.volumes }}"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+
+- name: Wait for Overseerr to be ready
+  uri:
+    url: "http://{{ server_ip }}:5055"
+    method: GET
+    timeout: 10
+  register: overseerr_status
+  until: overseerr_status.status == 200
+  retries: 12
+  delay: 5
+
+- name: Wait for Jellyseerr to be ready
+  uri:
+    url: "http://{{ server_ip }}:5056"
+    method: GET
+    timeout: 10
+  register: jellyseerr_status
+  until: jellyseerr_status.status == 200
+  retries: 12
+  delay: 5
+
+- name: Configure request management services
+  include_tasks: configure_request_services.yml

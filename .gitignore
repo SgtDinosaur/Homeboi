@@ -1,0 +1,17 @@
+# Local runtime/config (do not commit)
+settings.env
+provisioning.env
+.env
+service_urls.env
+ansible/service_urls.env
+homeboi-status.sh
+homeboi_global_updated
+
+# Generated state
+configs/
+cache/
+downloads/
+
+# Backups/logs
+*.bak
+*.log

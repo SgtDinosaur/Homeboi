@@ -1,0 +1,97 @@
+---
+# SABnzbd automatic configuration
+
+- name: Wait for SABnzbd config file to exist
+  wait_for:
+    path: "{{ homeboi_config_path }}/sabnzbd/sabnzbd.ini"
+    state: present
+    timeout: 120
+
+- name: Read SABnzbd config file
+  slurp:
+    src: "{{ homeboi_config_path }}/sabnzbd/sabnzbd.ini"
+  register: sabnzbd_ini_slurp
+  changed_when: false
+  failed_when: false
+
+- name: Set SABnzbd API key fact (regex parse)
+  set_fact:
+    sabnzbd_api_key: >-
+      {{
+        (
+          (sabnzbd_ini_slurp.content | default('') | b64decode)
+          | regex_findall('(?im)^api_key\\s*=\\s*([0-9a-fA-F]+)\\s*$')
+        )
+        | first
+        | default('')
+        | trim
+        | lower
+      }}
+
+- name: Generate SABnzbd API key if missing
+  set_fact:
+    sabnzbd_api_key: "{{ lookup('password', '/dev/null length=32 chars=0123456789abcdef') | lower }}"
+  when: sabnzbd_api_key | length == 0
+
+- name: Persist SABnzbd settings to sabnzbd.ini
+  ini_file:
+    path: "{{ homeboi_config_path }}/sabnzbd/sabnzbd.ini"
+    section: misc
+    option: "{{ item.option }}"
+    value: "{{ item.value }}"
+    no_extra_spaces: true
+  loop:
+    - { option: "api_key", value: "{{ sabnzbd_api_key }}" }
+    - { option: "nzb_key", value: "{{ sabnzbd_api_key }}" }
+    - { option: "disable_api_key", value: "0" }
+    - { option: "host_whitelist", value: "gluetun,localhost,127.0.0.1,sonarr,radarr" }
+  when: sabnzbd_api_key | length > 0
+  register: sabnzbd_ini_updates
+
+- name: Restart SABnzbd to apply API key changes
+  docker_container:
+    name: sabnzbd
+    state: started
+    restart: true
+  when:
+    - sabnzbd_api_key | length > 0
+    - sabnzbd_ini_updates is defined
+    - sabnzbd_ini_updates is changed
+
+- name: Wait for SABnzbd to be ready after restart
+  uri:
+    url: "http://{{ server_ip }}:8080/"
+    method: GET
+    timeout: 10
+    status_code: [200, 302]
+  register: sabnzbd_ready_after_restart
+  until: sabnzbd_ready_after_restart.status in [200, 302]
+  retries: 12
+  delay: 5
+  when: sabnzbd_api_key | length > 0
+  ignore_errors: yes
+
+- name: Debug SABnzbd API key
+  debug:
+    msg: "SABnzbd API key: {{ sabnzbd_api_key[:8] }}..."
+  when: sabnzbd_api_key | length > 0
+
+- name: Configure SABnzbd download paths
+  uri:
+    url: "http://{{ server_ip }}:8080/api?mode=set_config&section=misc&keyword=download_dir&value=/downloads/incomplete&apikey={{ sabnzbd_api_key }}"
+    method: GET
+  when: sabnzbd_api_key | length > 0
+  ignore_errors: yes
+
+- name: Configure SABnzbd complete paths
+  uri:
+    url: "http://{{ server_ip }}:8080/api?mode=set_config&section=misc&keyword=complete_dir&value=/downloads/complete&apikey={{ sabnzbd_api_key }}"
+    method: GET
+  when: sabnzbd_api_key | length > 0
+  ignore_errors: yes
+
+- name: Save SABnzbd API key for arr services
+  set_fact:
+    homeboi_api_keys:
+      sabnzbd: "{{ sabnzbd_api_key }}"
+  when: sabnzbd_api_key | length > 0

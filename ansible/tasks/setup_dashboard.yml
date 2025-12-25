@@ -1,0 +1,100 @@
+---
+# Setup simple dashboard replacement
+
+- name: Create dashboard script
+  copy:
+    content: |
+      #!/bin/bash
+      # Simple Homeboi dashboard replacement
+      
+      source {{ homeboi_home }}/service_urls.env 2>/dev/null || true
+      
+      echo "🏠 Homeboi Media Stack Status"
+      echo "=============================="
+      echo
+      
+      # Check service status
+      services=(homeboi-web plex jellyfin overseerr jellyseerr sabnzbd prowlarr sonarr radarr bazarr)
+      
+      for service in "${services[@]}"; do
+          if docker ps --filter "name=$service" --filter "status=running" --format "{{ "{{" }}.Names{{ "}}" }}" | grep -q "^$service$"; then
+              echo "🟢 $service - Running"
+          elif docker ps -a --filter "name=$service" --format "{{ "{{" }}.Names{{ "}}" }}" | grep -q "^$service$"; then
+              echo "🔴 $service - Stopped"
+          else
+              echo "⚫ $service - Not installed"
+          fi
+      done
+      
+      echo
+      echo "🌐 Quick Access URLs:"
+      echo "━━━━━━━━━━━━━━━━━━━━━"
+      echo "🏠 Homeboi Web:     $HOMEBOI_WEB_URL"
+      {% if vpn_service_provider is defined and vpn_service_provider != 'none' %}
+      echo "🛡  VPN Control:     $GLUETUN_URL"
+      {% endif %}
+      echo "📀 Plex:            $PLEX_URL" 
+      echo "🎞  Jellyfin:        $JELLYFIN_URL"
+      echo "🎭 Overseerr:       $OVERSEERR_URL"
+      echo "🎭 Jellyseerr:      $JELLYSEERR_URL"
+      echo "📦 SABnzbd:         $SABNZBD_URL"
+      echo "🔍 Prowlarr:        $PROWLARR_URL"
+      echo "📺 Sonarr:          $SONARR_URL"
+      echo "🎬 Radarr:          $RADARR_URL"
+      echo "💬 Bazarr:          $BAZARR_URL"
+      {% if enable_home_assistant | default(false) %}
+      echo "🏡 Home Assistant:  $HOME_ASSISTANT_URL"
+      {% endif %}
+      echo
+      echo "💡 Commands:"
+      echo "━━━━━━━━━━━━"
+      echo "Deploy:   ansible-playbook {{ homeboi_home }}/ansible/site.yml"
+      echo "Remove:   ansible-playbook {{ homeboi_home }}/ansible/site.yml -e state=absent"
+      echo "Logs:     docker logs <service_name>"
+      echo
+    dest: "{{ homeboi_home }}/homeboi-status.sh"
+    mode: '0755'
+
+- name: Create global homeboi command
+  copy:
+    content: |
+      #!/bin/bash
+      set -e
+      cd {{ homeboi_home }}
+      
+      # Default: interactive Homeboi UI (recommended)
+      if [[ $# -eq 0 ]]; then
+          exec ./homeboi.sh
+      fi
+
+      case "$1" in
+          "menu"|"ui")
+              exec ./homeboi.sh
+              ;;
+          "status")
+              exec ./homeboi-status.sh
+              ;;
+          "deploy"|"launch"|"remove"|"stop"|"update")
+              # Keep users in the interactive UI so they see prompts and the setup checklist link.
+              exec ./homeboi.sh
+              ;;
+          "logs")
+              if [ -n "${2:-}" ]; then
+                  docker logs "$2" -f
+              else
+                  echo "Usage: homeboi logs <service_name>"
+                  echo "Services: plex jellyfin overseerr jellyseerr sabnzbd prowlarr sonarr radarr bazarr"
+              fi
+              ;;
+          *)
+              echo "Homeboi Media Stack Manager"
+              echo "Commands:"
+              echo "  homeboi         - Open interactive UI (default)"
+              echo "  homeboi status  - Show service status"
+              echo "  homeboi logs <service> - Show service logs"
+              ;;
+      esac
+    dest: "/usr/local/bin/homeboi"
+    mode: '0755'
+  become: yes
+  ignore_errors: yes

@@ -1,0 +1,246 @@
+---
+# Removal playbook for Homeboi Media Stack
+
+- name: Remove Homeboi Media Stack
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  become: no
+  
+  vars:
+    # Always resolve Homeboi root from the playbook location, regardless of CWD.
+    homeboi_home: "{{ playbook_dir | dirname }}"
+    homeboi_config_path: "{{ homeboi_home }}/configs"
+    media_paths:
+      movies: "{{ homeboi_home }}/media/movies"
+      tv: "{{ homeboi_home }}/media/tv"
+      downloads: "{{ homeboi_home }}/media/downloads"
+    homeboi_services:
+      - gluetun
+      - sabnzbd
+      - prowlarr
+      - sonarr
+      - radarr
+      - bazarr
+      - plex
+      - jellyfin
+      - overseerr
+      - jellyseerr
+      - home-assistant
+    homeboi_legacy_networks:
+      - homeboi
+      - homeboi_default
+      - bazarr_default
+      - gluetun_default
+      - home-assistant_default
+      - jellyfin_default
+      - overseerr_default
+      - plex_default
+      - prowlarr_default
+      - radarr_default
+      - sonarr_default
+      
+  tasks:
+    - name: Confirm removal
+      pause:
+        prompt: |
+          ⚠️  WARNING: This will remove all Homeboi services!
+          
+          This will:
+          ❌ Stop and remove all containers
+          ❌ Remove Docker network
+          ⚠️  Keep media files (in {{ media_paths.movies }}, {{ media_paths.tv }}, etc.)
+          
+          Type 'yes' to confirm removal
+      register: removal_confirmation
+      
+    - name: Exit if removal not confirmed
+      fail:
+        msg: "Removal cancelled"
+      when: removal_confirmation.user_input != 'yes'
+      
+    - name: Ask about configuration files
+      pause:
+        prompt: |
+          🗂️  What about configuration files?
+          
+          Configuration files contain:
+          • Service settings and API keys
+          • Download history and statistics  
+          • Quality profiles and indexer configs
+          • User accounts and preferences
+          
+          Remove configuration files? (y/N)
+          ⚠️  Warning: This cannot be undone!
+      register: config_removal_choice
+
+    - name: Check for passwordless sudo (needed for root-owned configs)
+      command: sudo -n true
+      register: sudo_check
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Stop and remove containers
+      docker_container:
+        name: "{{ item }}"
+        state: absent
+        force_kill: yes
+      loop: "{{ homeboi_services }}"
+      ignore_errors: yes
+      
+    - name: Remove Docker network
+      docker_network:
+        name: homeboi-net
+        state: absent
+      ignore_errors: yes
+
+    - name: Remove legacy per-service Docker networks (if unused)
+      docker_network:
+        name: "{{ item }}"
+        state: absent
+      loop: "{{ homeboi_legacy_networks | default([]) }}"
+      ignore_errors: yes
+
+    - name: Thoroughly wipe Plex config (best-effort, avoids sudo prompts)
+      shell: |
+        set -euo pipefail
+        plex_dir="{{ homeboi_config_path }}/plex"
+        if [[ ! -d "$plex_dir" ]]; then
+          exit 0
+        fi
+        if docker image inspect homeboi-web-dashboard:latest >/dev/null 2>&1; then
+          docker run --rm \
+            -v "${plex_dir}:/target" \
+            homeboi-web-dashboard:latest \
+            sh -lc 'rm -rf /target/* /target/.[!.]* /target/..?* 2>/dev/null || true; chown -R {{ ansible_user_uid | default(1000) }}:{{ ansible_user_gid | default(1000) }} /target 2>/dev/null || true; chmod -R u+rwX /target 2>/dev/null || true'
+        else
+          # Fall back to wiping via an ephemeral container, if available.
+          docker run --rm \
+            -v "${plex_dir}:/target" \
+            busybox:latest \
+            sh -c 'rm -rf /target/* /target/.[!.]* /target/..?* 2>/dev/null || true' || true
+        fi
+      when: (config_removal_choice.user_input | default('n') | lower) in ['y', 'yes']
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Remove configuration directory (user-owned)
+      file:
+        path: "{{ homeboi_config_path }}"
+        state: absent
+      when: (config_removal_choice.user_input | default('n') | lower) in ['y', 'yes']
+      register: remove_config_dir_user
+      ignore_errors: yes
+
+    - name: Remove configuration directory (root-owned, passwordless sudo)
+      file:
+        path: "{{ homeboi_config_path }}"
+        state: absent
+      become: yes
+      when:
+        - (config_removal_choice.user_input | default('n') | lower) in ['y', 'yes']
+        - remove_config_dir_user is failed
+        - sudo_check.rc is defined
+        - sudo_check.rc == 0
+
+    - name: Warn when configs could not be removed (sudo password required)
+      debug:
+        msg: |
+          ⚠️ Could not remove {{ homeboi_config_path }} because some files are root-owned and sudo needs a password.
+
+          Fix options:
+          - Re-run removal with sudo prompt: ansible-playbook {{ homeboi_home }}/ansible/site-remove.yml -K
+          - Or remove manually: sudo rm -rf {{ homeboi_config_path }}
+      when:
+        - (config_removal_choice.user_input | default('n') | lower) in ['y', 'yes']
+        - remove_config_dir_user is failed
+        - (sudo_check.rc | default(1)) != 0
+
+    - name: Remove configuration directory via Docker (no sudo password required)
+      shell: |
+        set -euo pipefail
+        if ! command -v docker >/dev/null 2>&1; then
+          exit 0
+        fi
+        if ! docker image inspect homeboi-web-dashboard:latest >/dev/null 2>&1; then
+          exit 0
+        fi
+        docker run --rm \
+          -v "{{ homeboi_config_path }}:/target" \
+          homeboi-web-dashboard:latest \
+          sh -lc 'rm -rf /target/* /target/.[!.]* /target/..?* 2>/dev/null || true; chown -R {{ ansible_user_uid | default(1000) }}:{{ ansible_user_gid | default(1000) }} /target 2>/dev/null || true'
+      when:
+        - (config_removal_choice.user_input | default('n') | lower) in ['y', 'yes']
+        - remove_config_dir_user is failed
+        - (sudo_check.rc | default(1)) != 0
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Remove configuration directory (retry after Docker cleanup)
+      file:
+        path: "{{ homeboi_config_path }}"
+        state: absent
+      when:
+        - (config_removal_choice.user_input | default('n') | lower) in ['y', 'yes']
+        - remove_config_dir_user is failed
+        - (sudo_check.rc | default(1)) != 0
+      ignore_errors: yes
+      
+    - name: Remove settings.env file
+      file:
+        path: "{{ homeboi_home }}/settings.env"
+        state: absent
+      when: (config_removal_choice.user_input | default('n') | lower) in ['y', 'yes']
+
+    - name: Remove generated URLs file
+      file:
+        path: "{{ homeboi_home }}/service_urls.env"
+        state: absent
+      when: (config_removal_choice.user_input | default('n') | lower) in ['y', 'yes']
+      
+    - name: Remove global command
+      file:
+        path: /usr/local/bin/homeboi
+        state: absent
+      become: yes
+      ignore_errors: yes
+
+    - name: Remove user-local command
+      file:
+        path: "{{ ansible_env.HOME }}/.local/bin/homeboi"
+        state: absent
+      ignore_errors: yes
+      
+    - name: Display removal completion (configs removed)
+      debug:
+        msg: |
+          
+          ✅ Homeboi Media Stack Completely Removed
+          =========================================
+          
+          🗑️  All containers have been stopped and removed
+          🗑️  Docker network removed
+          🗑️  Configuration files removed (check output above for any manual cleanup needed)
+          🗑️  Settings file removed
+          💾 Media files preserved
+          
+          Note: If any config directories remain, you can remove them with: sudo rm -rf {{ homeboi_config_path }}
+          
+          To redeploy: Run 'Launch Stack' to start fresh
+      when: (config_removal_choice.user_input | default('n') | lower) in ['y', 'yes']
+      
+    - name: Display removal completion (configs preserved)
+      debug:
+        msg: |
+          
+          ✅ Homeboi Media Stack Removed
+          =============================
+          
+          🗑️  All containers have been stopped and removed
+          🗑️  Docker network removed
+          💾 Configuration data preserved in {{ ansible_env.PWD }}/configs/
+          💾 Settings preserved in {{ ansible_env.PWD }}/settings.env
+          💾 Media files preserved
+          
+          To redeploy: ansible-playbook site.yml
+      when: (config_removal_choice.user_input | default('n') | lower) not in ['y', 'yes']

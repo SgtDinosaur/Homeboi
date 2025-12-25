@@ -1,0 +1,61 @@
+---
+# VPN container deployment
+
+- name: Deploy Gluetun VPN container
+  docker_container:
+    name: gluetun
+    image: qmcgaw/gluetun:latest
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "8000:8000"  # Control server
+      - "8080:8080"  # SABnzbd through VPN
+      - "9696:9696"  # Prowlarr through VPN
+    env:
+      VPN_SERVICE_PROVIDER: "{{ vpn_service_provider }}"
+      OPENVPN_USER: "{{ openvpn_user }}"
+      OPENVPN_PASSWORD: "{{ openvpn_password }}"
+      TZ: "{{ timezone }}"
+    volumes:
+      - "{{ homeboi_config_path }}/gluetun:/gluetun"
+    capabilities:
+      - NET_ADMIN
+    devices:
+      - "/dev/net/tun:/dev/net/tun"
+    networks:
+      - name: "{{ homeboi_network.name }}"
+  when: vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none'
+
+- name: Wait for VPN connection
+  uri:
+    url: "http://127.0.0.1:8000/v1/openvpn/status"
+    method: GET
+    timeout: 10
+    status_code: [200, 401, 404]  # 401 if control server auth is enabled
+  register: vpn_status
+  until: vpn_status.status in [200, 401, 404]
+  retries: 6
+  delay: 5
+  when: vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none'
+  ignore_errors: yes
+
+- name: Verify VPN is working
+  uri:
+    url: "http://127.0.0.1:8000/v1/publicip/ip"
+    method: GET
+    status_code: [200, 401, 404]
+  register: vpn_ip
+  when: vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none' and vpn_status is defined
+  ignore_errors: yes
+
+- name: Display VPN status
+  debug:
+    msg: |
+      🛡️ VPN Status: Active
+      Provider: {{ vpn_service_provider }}
+      External IP: {{
+        vpn_ip.json.public_ip
+          if vpn_ip is defined and vpn_ip.status == 200 and vpn_ip.json is defined and vpn_ip.json.public_ip is defined
+          else 'Unavailable (control server auth enabled?)'
+      }}
+  when: vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none'

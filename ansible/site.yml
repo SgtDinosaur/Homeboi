@@ -1,0 +1,157 @@
+---
+# Main Homeboi Ansible Playbook
+# This replaces the shell-based deployment with reliable Ansible automation
+
+- name: Homeboi Media Stack Deployment
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  become: no
+  
+  vars_files:
+    - vars/main.yml
+    - vars/services.yml
+  
+  vars:
+    # Always resolve Homeboi root from the playbook location, regardless of CWD.
+    homeboi_home: "{{ playbook_dir | dirname }}"
+    config_file: "{{ homeboi_home }}/settings.env"
+    
+  pre_tasks:
+    - name: Check if configuration exists
+      stat:
+        path: "{{ config_file }}"
+      register: config_exists
+      
+    - name: Exit if no configuration (wizard should run from shell)
+      fail:
+        msg: "Configuration file {{ config_file }} not found. Run the shell wizard first."
+      when: not config_exists.stat.exists
+      
+    - name: Set default values for missing variables
+      set_fact:
+        homeboi_username: "{{ homeboi_username | default('admin') }}"
+        homeboi_password: "{{ homeboi_password | default('') }}"
+        homeboi_email: "{{ homeboi_email | default('admin@homeboi.local') }}"
+        homeboi_hostname: "{{ homeboi_hostname | default(hostname | default(ansible_hostname), true) }}"
+        enable_arr_auth: "{{ enable_arr_auth | default(true) | bool }}"
+        primary_media_server: "{{ primary_media_server | default('jellyfin', true) }}"
+        primary_request_app: "{{ primary_request_app | default('jellyseerr', true) }}"
+        server_ip: "{{ server_ip | default(ansible_default_ipv4.address) }}"
+        timezone: "{{ timezone | default('UTC') }}"
+        vpn_service_provider: "{{ vpn_service_provider | default('') }}"
+        openvpn_user: "{{ openvpn_user | default('') }}"
+        openvpn_password: "{{ openvpn_password | default('') }}"
+        nzbgeek_api: "{{ nzbgeek_api | default('') }}"
+        drunkenslug_api: "{{ drunkenslug_api | default('') }}"
+        nzbplanet_api: "{{ nzbplanet_api | default('') }}"
+
+    - name: Validate required credentials are set
+      fail:
+        msg: "Missing required credentials (HOMEBOI_USERNAME/HOMEBOI_PASSWORD). Run the Homeboi wizard first."
+      when: homeboi_username | length == 0 or homeboi_password | length == 0
+      
+  tasks:
+    - name: Deploy Homeboi services atomically
+      block:
+        - name: Deploy common infrastructure
+          include_role:
+            name: common
+            
+        - name: Deploy VPN service
+          include_role:
+            name: vpn
+          when: vpn_service_provider is defined and vpn_service_provider != '' and vpn_service_provider != 'none'
+          
+        - name: Deploy media servers
+          include_role:
+            name: media_servers
+            
+        - name: Deploy download clients
+          include_role:
+            name: download_clients
+            
+        - name: Deploy arr services
+          include_role:
+            name: arr_services
+            
+        - name: Deploy request management
+          include_role:
+            name: request_management
+            
+        - name: Deploy monitoring services
+          include_role:
+            name: monitoring
+            
+      rescue:
+        - name: Deployment failed - starting rollback
+          debug:
+            msg: |
+              ❌ Deployment failed! Rolling back all services to ensure clean state.
+              This prevents partial deployments that leave some services running.
+              
+        - name: Stop and remove all Homeboi containers
+          docker_container:
+            name: "{{ item }}"
+            state: absent
+            force_kill: yes
+          loop:
+            - gluetun
+            - sabnzbd
+            - prowlarr
+            - sonarr
+            - radarr
+            - bazarr
+            - plex
+            - jellyfin
+            - overseerr
+            - jellyseerr
+            - home-assistant
+          ignore_errors: yes
+          
+        - name: Remove Homeboi network
+          docker_network:
+            name: "{{ homeboi_network.name }}"
+            state: absent
+          ignore_errors: yes
+
+        - name: Remove legacy per-service Docker networks (if unused)
+          docker_network:
+            name: "{{ item }}"
+            state: absent
+          loop: "{{ homeboi_legacy_networks | default([]) }}"
+          ignore_errors: yes
+          
+        - name: Display rollback completion
+          debug:
+            msg: |
+              🔄 Rollback completed - all Homeboi containers removed
+              ✅ System returned to clean state
+              🔍 Check the error above for deployment failure details
+              
+        - name: Fail the deployment
+          fail:
+            msg: "Atomic deployment failed - all services rolled back"
+      
+  post_tasks:
+    - name: Display deployment success
+      debug:
+        msg: |
+          ✅ Atomic Deployment Successful!
+          ================================
+          
+          All services have been deployed successfully.
+          No rollback was needed - your media stack is ready!
+          
+    - name: Display service URLs
+      include_tasks: tasks/display_urls.yml
+      
+    - name: Setup monitoring dashboard
+      include_tasks: tasks/setup_dashboard.yml
+      
+  handlers:
+    - name: restart docker
+      service:
+        name: docker
+        state: restarted
+      become: yes
